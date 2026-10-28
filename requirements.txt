@@ -1,0 +1,42 @@
+# ============================================================
+# Roast My Resume — Requirements (Compatible & Flexible Ranges)
+# ============================================================
+
+# Core API & Orchestration
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+
+# LangChain / LangGraph AI Orchestration
+# Note: Loosened ranges to allow pip resolver to select compatible cross-dependencies
+langchain>=0.3.0,<0.4.0
+langchain-core>=0.3.15,<0.4.0
+langchain-openai>=0.2.0,<0.4.0
+langchain-community>=0.3.0,<0.4.0
+langchain-groq>=0.2.0,<0.4.0
+langgraph>=0.2.28,<0.3.0
+
+# Vector Database
+qdrant-client>=1.10.0
+
+# Document Processing
+pypdf>=4.3.0
+PyPDF2>=3.0.0
+fonttools>=4.50.0
+
+# Sparse / BM25 Embeddings
+rank-bm25>=0.2.2
+
+# Dense Embeddings — sentence-transformers as local fallback
+sentence-transformers>=3.0.0
+
+# Frontend
+streamlit>=1.38.0
+httpx>=0.27.0
+
+# Utilities
+python-dotenv>=1.0.0
+loguru>=0.7.0
+numpy>=1.26.0
