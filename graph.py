@@ -331,6 +331,26 @@ def node_retrieve(state: GraphState) -> GraphState:
     collection  = cfg.qdrant_collection
     k           = cfg.top_k
 
+    # Fail before issuing searches when the configured collection has not been
+    # ingested.  The individual dense/sparse searches intentionally tolerate
+    # one vector type failing, so without this check a missing collection was
+    # silently converted into an empty evidence list.
+    collections = {item.name for item in client.get_collections().collections}
+    if collection not in collections:
+        available = ", ".join(sorted(collections)) or "none"
+        raise RuntimeError(
+            f"Qdrant collection '{collection}' does not exist at "
+            f"{cfg.qdrant_host}:{cfg.qdrant_port} (available: {available}). "
+            "Run 'python ingest.py' to create and populate it."
+        )
+
+    collection_info = client.get_collection(collection)
+    if not collection_info.points_count:
+        raise RuntimeError(
+            f"Qdrant collection '{collection}' exists but contains no points. "
+            "Run 'python ingest.py' to populate it."
+        )
+
     experience_text = " ".join(parsed.get("work_experience", [])[:5])
     skills_text     = " ".join(parsed.get("skills", [])[:20])
 
