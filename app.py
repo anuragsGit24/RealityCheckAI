@@ -479,8 +479,9 @@ def check_system_telemetry() -> dict[str, Any] | None:
 
 def execute_evaluation(pdf_bytes: bytes, job_description: str) -> dict[str, Any]:
     """
-    Submits evaluation payload to FastAPI REST API with automatic, seamless
-    in-process LangGraph engine fallback if the server is offline.
+    Submit evaluations to FastAPI. The in-process engine is only used for
+    local development; hosted deployments must use the configured backend so
+    they do not silently fall back to Streamlit's separate secrets/database.
     """
     # 1. Attempt FastAPI HTTP REST endpoint
     for base in CANDIDATE_BASES:
@@ -492,23 +493,26 @@ def execute_evaluation(pdf_bytes: bytes, job_description: str) -> dict[str, Any]
                     files={"resume_pdf": ("candidate_resume.pdf", pdf_bytes, "application/pdf")},
                     data={"job_description": job_description},
                 )
-            if response.status_code == 200:
-                payload = response.json()
-                payload["execution_runtime"] = f"FastAPI Worker ({base})"
-                return payload
-            # A reachable backend returning an error must not fall through to
-            # the Streamlit process's local graph, which lacks Render's secrets
-            # and Qdrant connectivity and obscures the real backend error.
-            try:
-                detail = response.json().get("detail", response.text)
-            except Exception:
-                detail = response.text
-            raise RuntimeError(f"Backend returned HTTP {response.status_code}: {detail}")
+        except httpx.RequestError as exc:
+            if not base.startswith(("http://127.0.0.1", "http://localhost")):
+                raise RuntimeError(f"Could not reach backend at {base}: {exc}") from exc
+            continue
+
+        if response.status_code == 200:
+            payload = response.json()
+            payload["execution_runtime"] = f"FastAPI Worker ({base})"
+            return payload
+
+        # Surface the backend's real error. Do not fall back to a different
+        # hosted process with a different environment and Qdrant collection.
+        try:
+            detail = response.json().get("detail", response.text)
         except Exception:
-            # Preserve HTTP failures raised above; only use local fallback when
-            # no backend could be reached.
-            if "response" in locals() and response.request.url == endpoint:
-                raise
+            detail = response.text
+        raise RuntimeError(f"Backend returned HTTP {response.status_code}: {detail}")
+
+    if not all(base.startswith(("http://127.0.0.1", "http://localhost")) for base in CANDIDATE_BASES):
+        raise RuntimeError("The configured backend could not be reached.")
 
     # 2. In-Process LangGraph Fallback (Ensures 100% demo continuity)
     from main import extract_text_from_pdf
