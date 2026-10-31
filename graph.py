@@ -31,7 +31,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient, models
 
-from config import get_settings
+from config import get_qdrant_client, get_settings
 from llm_factory import get_embeddings, get_llm
 from ingest import build_bm25_sparse_vectors, build_query_sparse_vector
 
@@ -53,6 +53,7 @@ class GraphState(TypedDict, total=False):
     parsed_sections: dict[str, Any]
     retrieved_context: list[dict[str, Any]]
     final_roast: dict[str, Any]
+    retrieval_diagnostics: dict[str, Any]
     error: str | None
 
 
@@ -245,6 +246,7 @@ def _hybrid_search(
         )
 
     results: list[dict[str, Any]] = []
+    search_errors: list[str] = []
 
     # 4. Dense-vector search
     try:
@@ -269,6 +271,7 @@ def _hybrid_search(
                 }
             )
     except Exception as exc:
+        search_errors.append(f"dense: {exc}")
         logger.warning(f"Dense search failed: {exc}")
 
     # 5. Sparse BM25 search (keyword-level)
@@ -301,7 +304,14 @@ def _hybrid_search(
                         }
                     )
     except Exception as exc:
+        search_errors.append(f"sparse: {exc}")
         logger.warning(f"Sparse search failed (non-fatal): {exc}")
+
+    if search_errors and not results:
+        raise RuntimeError(
+            f"No {doc_type_filter or 'unfiltered'} Qdrant results. "
+            + " | ".join(search_errors)
+        )
 
     # Sort merged results by score descending, keep top_k
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -326,7 +336,9 @@ def node_retrieve(state: GraphState) -> GraphState:
     jd_text = state.get("job_description", "")
     resume  = state.get("resume_text", "")
 
-    client      = QdrantClient(host=cfg.qdrant_host, port=cfg.qdrant_port)
+    # Local Docker Qdrant:
+    # client = QdrantClient(host=cfg.qdrant_host, port=cfg.qdrant_port)
+    client      = get_qdrant_client(cfg)
     embed_model = get_embeddings()
     collection  = cfg.qdrant_collection
     k           = cfg.top_k
@@ -340,16 +352,34 @@ def node_retrieve(state: GraphState) -> GraphState:
         available = ", ".join(sorted(collections)) or "none"
         raise RuntimeError(
             f"Qdrant collection '{collection}' does not exist at "
-            f"{cfg.qdrant_host}:{cfg.qdrant_port} (available: {available}). "
+            f"{cfg.qdrant_url} (available: {available}). "
             "Run 'python ingest.py' to create and populate it."
         )
 
     collection_info = client.get_collection(collection)
-    if not collection_info.points_count:
+    point_count = collection_info.points_count or 0
+    if not point_count:
         raise RuntimeError(
             f"Qdrant collection '{collection}' exists but contains no points. "
             "Run 'python ingest.py' to populate it."
         )
+
+    # Metadata-filtered searches require a Qdrant payload index. Create it
+    # here as well as during ingestion so existing populated collections work
+    # without requiring a destructive re-ingestion.
+    client.create_payload_index(
+        collection_name=collection,
+        field_name="doc_type",
+        field_schema=models.PayloadSchemaType.KEYWORD,
+    )
+
+    retrieval_diagnostics: dict[str, Any] = {
+        "backend": "Qdrant Cloud",
+        "collection": collection,
+        "points": point_count,
+        "url": cfg.qdrant_url,
+        "queries": [],
+    }
 
     experience_text = " ".join(parsed.get("work_experience", [])[:5])
     skills_text     = " ".join(parsed.get("skills", [])[:20])
@@ -358,54 +388,109 @@ def node_retrieve(state: GraphState) -> GraphState:
     ats_query = (
         f"ATS machine readability formatting rules for a resume applying to: {jd_text[:300]}"
     )
-    ats_results = _hybrid_search(client, collection, ats_query, "ats_rule", k, embed_model)
+    try:
+        ats_results = _hybrid_search(client, collection, ats_query, "ats_rule", k, embed_model)
+        ats_error = None
+    except Exception as exc:
+        ats_results = []
+        ats_error = str(exc)
     logger.info(f"  ATS rules retrieved: {len(ats_results)}")
+    retrieval_diagnostics["queries"].append(
+        {"doc_type": "ats_rule", "results": len(ats_results), "error": ats_error}
+    )
 
     # Query 2 — Writing formulas
     writing_query = (
         f"Improve weak resume bullet points using XYZ formula impact metrics action verbs. "
         f"Current bullets: {experience_text[:300]}"
     )
-    writing_results = _hybrid_search(client, collection, writing_query, "writing_rule", k, embed_model)
+    try:
+        writing_results = _hybrid_search(client, collection, writing_query, "writing_rule", k, embed_model)
+        writing_error = None
+    except Exception as exc:
+        writing_results = []
+        writing_error = str(exc)
     logger.info(f"  Writing rules retrieved: {len(writing_results)}")
+    retrieval_diagnostics["queries"].append(
+        {"doc_type": "writing_rule", "results": len(writing_results), "error": writing_error}
+    )
 
     # Query 3 — Gold MIT examples similar to the user's experience
     example_query = (
         f"Gold standard engineering resume example for skills: {skills_text[:200]} "
         f"applying for: {jd_text[:200]}"
     )
-    example_results = _hybrid_search(client, collection, example_query, "gold_example", k, embed_model)
+    try:
+        example_results = _hybrid_search(client, collection, example_query, "gold_example", k, embed_model)
+        example_error = None
+    except Exception as exc:
+        example_results = []
+        example_error = str(exc)
     logger.info(f"  Gold examples retrieved: {len(example_results)}")
+    retrieval_diagnostics["queries"].append(
+        {"doc_type": "gold_example", "results": len(example_results), "error": example_error}
+    )
 
     all_context = ats_results + writing_results + example_results
     logger.success(f"  Total retrieved context chunks: {len(all_context)}")
 
-    return {**state, "retrieved_context": all_context, "error": None}
+    return {
+        **state,
+        "retrieved_context": all_context,
+        "retrieval_diagnostics": retrieval_diagnostics,
+        "error": None,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Node 3 — Generate Roast
 # ─────────────────────────────────────────────────────────────────────────────
 
-_ROAST_SYSTEM = """You are a brutally honest but constructive resume critic with 20 years of experience
-in technical recruiting at top-tier technology companies.
+_ROAST_SYSTEM = """You are the senior resume evaluator at a brutally selective technical recruiting firm.
+You have reviewed thousands of engineering, product, data, and software resumes. Your voice is sharp,
+observant, expressive, and occasionally witty, but never childish, abusive, or personal. Roast the
+document and its decisions—not the candidate's worth.
 
-Your critique must be:
-- EVIDENCE-BASED: Every flaw must be backed by a specific rule or example from the retrieved context.
-- SPECIFIC: Reference actual bullet points, dates, or phrasing from the resume.
-- ACTIONABLE: Every fix must be a concrete rewrite, not vague advice.
-- CALIBRATED: Score the resume fairly (0–100) considering ATS compatibility, writing quality,
-  and alignment with the job description.
+Your job is to expose the difference between what this resume claims and what a skeptical hiring manager
+can actually verify in a six-second scan. Treat every sentence as evidence: identify what is vague,
+unmeasured, repetitive, inflated, buried, poorly ordered, or unsupported. Do not reward fashionable
+phrases merely because they sound professional.
 
-Return ONLY valid JSON matching this exact schema (no markdown fences):
+Evaluation standard:
+- ATS READABILITY: Check structure, section clarity, conventional headings, parsing risks, keyword
+  coverage, and whether important evidence is likely to survive automated screening.
+- IMPACT: Check whether bullets show ownership, action, scope, technical difficulty, measurable results,
+  and clear before/after value. Separate responsibilities from achievements.
+- SIGNAL-TO-NOISE: Penalize filler, generic adjectives, duplicated claims, unexplained acronyms,
+  bloated summaries, skill dumps, and details that consume space without improving candidacy.
+- JD FIT: Compare the resume to the supplied job description. Identify missing requirements, weak
+  keyword alignment, and claims that are present but not demonstrated.
+- CREDIBILITY: Never invent metrics, employers, technologies, outcomes, or experience. If a number is
+  missing, propose a measurable placeholder or a truthful way to quantify it rather than fabricating one.
+- GROUNDING: Use the retrieved context as the benchmark for recommendations. If the context does not
+  support a claim, label the recommendation as general resume judgment and do not manufacture a quote.
+
+Writing requirements:
+- Start the narrative with the most consequential diagnosis, not a generic compliment.
+- Make the narrative vivid and memorable through precise comparisons and strong verbs, while remaining
+  professionally useful.
+- Reference the candidate's actual wording, section, role, date, or claim whenever possible.
+- Distinguish fatal or high-risk issues from polish. Do not treat every imperfection as critical.
+- Every fix must say exactly what to change and provide a ready-to-adapt rewrite or transformation.
+- Preserve truthful content. Do not add decorative symbols to the resume or treat ordinary bullet markers
+  as decorative symbols; only discuss a symbol if it is literally present in the supplied resume text.
+- Order fixes from highest hiring impact to lowest. Include at least three fixes when the resume has
+  enough evidence, and do not pad the list with repetitive advice.
+
+Return ONLY valid JSON matching this exact schema (no markdown fences and no extra keys):
 {
   "overall_score": <int 0-100>,
-  "brutal_roast": "<3-5 sentence brutal narrative>",
+  "brutal_roast": "<4-7 sentence sharp, expressive, evidence-backed narrative>",
   "actionable_fixes": [
     {
       "issue": "<specific problem>",
-      "fix": "<concrete rewrite or action>",
-      "rule_reference": "<exact quote from retrieved context>",
+      "fix": "<concrete rewrite, replacement structure, or action>",
+      "rule_reference": "<short exact quote from retrieved context, or 'General resume judgment: <specific principle>'>",
       "severity": "critical|major|minor"
     }
   ],
@@ -532,4 +617,3 @@ def build_graph() -> Any:
 # Singleton compiled graph (imported by main.py)
 roast_graph = build_graph()
 logger.info("LangGraph compiled successfully — 3-node sequential pipeline ready.")
-

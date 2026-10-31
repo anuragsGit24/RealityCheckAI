@@ -75,8 +75,12 @@ class Settings(BaseSettings):
     )
 
     # ── Qdrant ────────────────────────────────────────────────────────────────
+    # Local Docker fallback configuration. Cloud settings below are active.
     qdrant_host: str = Field(default="localhost")
     qdrant_port: int = Field(default=6333)
+    qdrant_url: str = Field(default="")
+    qdrant_api_key: str = Field(default="")
+    qdrant_timeout: int = Field(default=120)
     qdrant_collection: str = Field(default="roast_resume")
 
     # ── Ingestion ─────────────────────────────────────────────────────────────
@@ -104,3 +108,30 @@ def get_settings() -> Settings:
     """Return the singleton Settings object (cached after first call)."""
     return Settings()
 
+
+def get_qdrant_client(
+    settings: Settings | None = None,
+    *,
+    timeout: float | None = None,
+):
+    """Create the configured Qdrant Cloud client."""
+    from qdrant_client import QdrantClient
+
+    cfg = settings or get_settings()
+    if not cfg.qdrant_url:
+        raise ValueError(
+            "QDRANT_URL is not set in .env. "
+            "Configure the Qdrant Cloud URL before starting the application."
+        )
+    if not cfg.qdrant_api_key:
+        raise ValueError(
+            "QDRANT_API_KEY is not set in .env. "
+            "Configure the Qdrant Cloud API key before starting the application."
+        )
+
+    client_options = {
+        "url": cfg.qdrant_url,
+        "api_key": cfg.qdrant_api_key,
+    }
+    client_options["timeout"] = timeout if timeout is not None else cfg.qdrant_timeout
+    return QdrantClient(**client_options)

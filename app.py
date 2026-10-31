@@ -1,5 +1,5 @@
 """
-app.py — GraphRoast AI: Enterprise Peer-Reviewed Career Demolition Interface
+app.py — RealityCheck AI: Enterprise Peer-Reviewed Career Demolition Interface
 
 A modern, high-precision SaaS frontend for evaluating resumes against empirical
 ground-truth documents (ATS guidelines, Leland bullet formulas, and MIT benchmarks)
@@ -511,6 +511,7 @@ def execute_evaluation(pdf_bytes: bytes, job_description: str) -> dict[str, Any]
         "final_roast": final_state.get("final_roast", {}),
         "retrieved_context": final_state.get("retrieved_context", []),
         "parsed_sections": final_state.get("parsed_sections", {}),
+        "retrieval_diagnostics": final_state.get("retrieval_diagnostics", {}),
         "error": final_state.get("error"),
     }
 
@@ -561,7 +562,7 @@ def render_hero_section() -> None:
                 Deterministic LangGraph Machine · Hybrid Vector Retrieval
             </div>
             <div class="hero-title">
-                GraphRoast <span class="accent">AI</span>
+                RealityCheck <span class="accent">AI</span>
             </div>
             <div class="hero-subtitle">
                 An empirical, peer-reviewed evaluation engine comparing your career claims against
@@ -773,6 +774,7 @@ def main() -> None:
         data = st.session_state.evaluation_result
         roast = data.get("final_roast", {})
         context = data.get("retrieved_context", [])
+        retrieval_diagnostics = data.get("retrieval_diagnostics", {})
         parsed = data.get("parsed_sections", {})
         runtime_mode = data.get("execution_runtime", "Standard Pipeline")
 
@@ -921,7 +923,14 @@ def main() -> None:
                 with sub_raw:
                     st.json(context)
             else:
-                st.warning("No context chunks were returned by the retrieval node. Check Qdrant collection status.")
+                st.warning("No context chunks were returned by the retrieval node.")
+                if retrieval_diagnostics:
+                    st.json(retrieval_diagnostics)
+                else:
+                    st.info(
+                        "The active backend did not return Qdrant diagnostics. "
+                        "Restart the FastAPI worker so it loads the current code."
+                    )
 
         # ── Tab 4: Extracted AST Schema (Node 1 Parser Output) ───────────────
         with tab_schema:

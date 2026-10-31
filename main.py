@@ -29,11 +29,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
 from pypdf import PdfReader
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 
-from config import get_settings
+from config import get_qdrant_client as create_qdrant_client, get_settings
 from graph import roast_graph
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -97,6 +97,7 @@ class EvaluateResponse(BaseModel):
     final_roast: dict[str, Any]
     retrieved_context: list[dict[str, Any]]
     parsed_sections: dict[str, Any]
+    retrieval_diagnostics: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
 
@@ -127,7 +128,9 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 
 def get_qdrant_client() -> QdrantClient:
-    return QdrantClient(host=cfg.qdrant_host, port=cfg.qdrant_port, timeout=5)
+    # Local Docker Qdrant:
+    # return QdrantClient(host=cfg.qdrant_host, port=cfg.qdrant_port, timeout=5)
+    return create_qdrant_client(cfg, timeout=5)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -288,6 +291,7 @@ async def evaluate_resume(
         final_roast=final_state.get("final_roast", {}),
         retrieved_context=final_state.get("retrieved_context", []),
         parsed_sections=final_state.get("parsed_sections", {}),
+        retrieval_diagnostics=final_state.get("retrieval_diagnostics", {}),
         error=final_state.get("error"),
     )
 
@@ -313,4 +317,3 @@ if __name__ == "__main__":
         reload=False,
         log_level="info",
     )
-

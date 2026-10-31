@@ -36,12 +36,13 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import (
     Distance,
     PointStruct,
+    PayloadSchemaType,
     SparseIndexParams,
     SparseVectorParams,
     VectorParams,
 )
 
-from config import get_settings
+from config import get_qdrant_client, get_settings
 from llm_factory import get_embeddings
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -303,6 +304,11 @@ def create_qdrant_collection(client: QdrantClient, collection: str, vector_size:
             )
         },
     )
+    client.create_payload_index(
+        collection_name=collection,
+        field_name="doc_type",
+        field_schema=PayloadSchemaType.KEYWORD,
+    )
     logger.info(f"Collection '{collection}' created (dense={vector_size}d + sparse BM25).")
 
 
@@ -329,7 +335,9 @@ def upsert_chunks(
         )
         points.append(point)
 
-    batch_size = 64
+    # Cloud uploads can take longer than local Docker uploads; smaller batches
+    # keep each request comfortably within the configured client timeout.
+    batch_size = 16
     for start in range(0, len(points), batch_size):
         batch = points[start : start + batch_size]
         client.upsert(collection_name=collection, points=batch)
@@ -425,7 +433,9 @@ def main() -> None:
     logger.info("PHASE 4 — Upserting into Qdrant")
     logger.info("=" * 60)
 
-    client = QdrantClient(host=cfg.qdrant_host, port=cfg.qdrant_port)
+    # Local Docker Qdrant:
+    # client = QdrantClient(host=cfg.qdrant_host, port=cfg.qdrant_port)
+    client = get_qdrant_client(cfg)
     create_qdrant_collection(client, cfg.qdrant_collection, vector_size)
     upsert_chunks(client, cfg.qdrant_collection, all_chunks, dense_embeddings, sparse_vecs)
 
