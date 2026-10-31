@@ -195,7 +195,6 @@ async def collection_info() -> JSONResponse:
             content={
                 "collection": cfg.qdrant_collection,
                 "points_count": info.points_count,
-                "vectors_count": info.vectors_count,
                 "status": str(info.status),
             }
         )
