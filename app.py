@@ -22,6 +22,7 @@ from __future__ import annotations
 import html
 import json
 import time
+import os
 from typing import Any
 
 import httpx
@@ -41,10 +42,18 @@ except Exception:
     _LLM_CFG = None
 
 API_PORT = getattr(_LLM_CFG, "api_port", 8000) if _LLM_CFG else 8000
-CANDIDATE_BASES = [
-    f"http://127.0.0.1:{API_PORT}",
-    f"http://localhost:{API_PORT}",
-]
+try:
+    # Streamlit Community Cloud stores deployment configuration in secrets,
+    # which are not automatically exported as process environment variables.
+    _STREAMLIT_BACKEND_URL = st.secrets.get("BACKEND_URL", "")
+except Exception:
+    _STREAMLIT_BACKEND_URL = ""
+
+BACKEND_URL = (
+    os.getenv("BACKEND_URL") or _STREAMLIT_BACKEND_URL or "http://127.0.0.1:8000"
+).rstrip("/")
+
+CANDIDATE_BASES = [BACKEND_URL]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Streamlit Page Configuration
@@ -487,8 +496,19 @@ def execute_evaluation(pdf_bytes: bytes, job_description: str) -> dict[str, Any]
                 payload = response.json()
                 payload["execution_runtime"] = f"FastAPI Worker ({base})"
                 return payload
+            # A reachable backend returning an error must not fall through to
+            # the Streamlit process's local graph, which lacks Render's secrets
+            # and Qdrant connectivity and obscures the real backend error.
+            try:
+                detail = response.json().get("detail", response.text)
+            except Exception:
+                detail = response.text
+            raise RuntimeError(f"Backend returned HTTP {response.status_code}: {detail}")
         except Exception:
-            pass
+            # Preserve HTTP failures raised above; only use local fallback when
+            # no backend could be reached.
+            if "response" in locals() and response.request.url == endpoint:
+                raise
 
     # 2. In-Process LangGraph Fallback (Ensures 100% demo continuity)
     from main import extract_text_from_pdf
