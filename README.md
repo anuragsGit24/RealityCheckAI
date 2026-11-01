@@ -1,6 +1,6 @@
 # 🔥 Roast My Resume — RAG Edition
 
-> **Academic Computer Science Lab Project**  
+> **Academic ESE Project**  
 > Evidence-based resume critique powered by Hybrid RAG (Qdrant) + LangGraph + FastAPI
 
 ---
